@@ -8,7 +8,7 @@ from itertools import chain
 
 data_filename = 'macmorpho-train.txt'
 batch_sz = 128
-eps = 10
+eps = 201
 min_count = 5
 win_sz = 5
 neg_samples = 15
@@ -26,8 +26,8 @@ def skipgrams(sequence,
               shuffle=True,
               sampling_table=None,
               seed=None):
-    couples = []
-    labels = []
+    words = []
+    contexts = []
     for i, wi in enumerate(sequence):
         if not wi:
             continue
@@ -42,18 +42,18 @@ def skipgrams(sequence,
                 wj = sequence[j]
                 if not wj:
                     continue
-                couples.append([wi, wj])
-                labels.append(1)
+                words.append(wi)
+                contexts.append(wj)
 
     if shuffle:
         if seed is None:
             seed = random.randint(0, 10e6)
         random.seed(seed)
-        random.shuffle(couples)
+        random.shuffle(words)
         random.seed(seed)
-        random.shuffle(labels)
+        random.shuffle(contexts)
 
-    return couples, labels
+    return words, contexts
 
 
 def tokenizer(filename):
@@ -79,34 +79,27 @@ def texts_to_sequences(texts, word2id):
 sents, freqs, w2id, id2w = tokenizer(data_filename)
 sequences = texts_to_sequences(sents, w2id)
 sampling_tbl = make_sampling_table(freqs, sampling_factor=sampling_fac)
-cpls = []
-lbls = []
+wrds = []
+ctxts = []
 for seq in sequences:
-    c_, l_ = skipgrams(seq, window_size=win_sz, sampling_table=sampling_tbl)
-    cpls += c_
-    lbls += l_
-
-# sampled_ids, true_count, sampled_count = tf.nn.fixed_unigram_candidate_sampler(
-#     true_classes=,
-#     num_true=1,
-#     num_sampled=neg_samples,
-#     unique=True,
-#     range_max=len(w2id),
-#     distortion=distortion_fac,
-#     unigrams=freqs)
-
+    w_, c_ = skipgrams(seq, window_size=win_sz, sampling_table=sampling_tbl)
+    wrds += w_
+    ctxts += c_
 
 with tf.Graph().as_default() as graph:
     with tf.name_scope('inputs'):
-        inputs = tf.placeholder(tf.int64, shape=[batch_sz])
-        labels = tf.placeholder(tf.int64, shape=[batch_sz, 1])
+        inputs = tf.placeholder(tf.int64, [batch_sz], name='inputs')
+        labels = tf.placeholder(tf.int64, [batch_sz, 1], name='labels')
+        sampled_ids = tf.placeholder(tf.int64, [neg_samples], name='samp_ids')
+        true_count = tf.placeholder(tf.float64, [batch_sz, 1], name='true_cnt')
+        sampled_count = tf.placeholder(tf.float64, [neg_samples], name='samp_cnt')
 
     with tf.name_scope('embeddings'):
         embeddings = tf.get_variable(
             'embeddings',
             shape=[len(w2id), emb_dim],
             dtype=tf.float64,
-            initializer=tf.glorot_uniform_initializer)
+            initializer=tf.glorot_uniform_initializer())
         embs = tf.nn.embedding_lookup(embeddings, inputs)
 
     with tf.name_scope('weights'):
@@ -114,7 +107,7 @@ with tf.Graph().as_default() as graph:
             'loss_weights',
             shape=[len(w2id), emb_dim],
             dtype=tf.float64,
-            initializer=tf.glorot_uniform_initializer)
+            initializer=tf.glorot_uniform_initializer())
 
     with tf.name_scope('biases'):
         loss_b = tf.get_variable(
@@ -128,22 +121,50 @@ with tf.Graph().as_default() as graph:
             weights=loss_w,
             biases=loss_b,
             labels=labels,
-            inputs=inputs,
+            inputs=embs,
             num_sampled=neg_samples,
             num_classes=len(w2id),
             sampled_values=(sampled_ids, true_count, sampled_count))
 
     with tf.name_scope('optimizer'):
-        optimizer = tf.train.GradientDescentOptimizer(.025).minimize(loss)
+        optimizer = tf.train.GradientDescentOptimizer(1).minimize(loss)
 
     with tf.Session(graph=graph) as sess:
         writer = tf.summary.FileWriter('./graphs', session=sess)
         sess.run(tf.global_variables_initializer())
 
         average_loss = 0
-        for i in range(eps):
-            for
-            _, loss_val = sess.run([optimizer, loss], feed_dict=)
-            average_loss += loss_val
+        for ep in range(eps):
+            for step in range(len(w2id) // batch_sz):
+                inputs = wrds[batch_sz * step:batch_sz * (step + 1)]
+                inputs = tf.convert_to_tensor(inputs, tf.int64)
+                labels = ctxts[batch_sz * step:batch_sz * (step + 1)]
+                labels_matrix = tf.reshape(tf.cast(labels, tf.int64),
+                                           [batch_sz, 1])
+                print('teste')
+                sampled_ids, true_count, sampled_count = \
+                    tf.nn.fixed_unigram_candidate_sampler(
+                        true_classes=labels_matrix,
+                        num_true=1,
+                        num_sampled=neg_samples,
+                        unique=True,
+                        range_max=len(w2id),
+                        distortion=distortion_fac,
+                        unigrams=freqs)
+
+                feed_dict = {inputs: inputs,
+                             labels: labels_matrix,
+                             sampled_ids: sampled_ids,
+                             true_count: true_count,
+                             sampled_count: sampled_count}
+
+                _, loss_val = sess.run([optimizer, loss], feed_dict=feed_dict)
+                average_loss += loss_val
+
+                if step % 100 == 0:
+                    if step > 0:
+                        average_loss /= 2000
+                        print(step, ': ', average_loss)
+                average_loss = 0
 
     writer.close()
