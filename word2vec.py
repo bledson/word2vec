@@ -6,19 +6,16 @@ import tensorflow as tf
 from collections import Counter
 from itertools import chain
 
-data_filename = 'macmorpho-train.txt'
-batch_sz = 128
-eps = 201
-min_count = 5
-win_sz = 5
-neg_samples = 15
-emb_dim = 50
-sampling_fac = 1e-5
-distortion_fac = .75
-
-
-def make_sampling_table(word_freqs, sampling_factor=1e-5):
-    return [1 - math.sqrt(sampling_factor / freq_i) for freq_i in word_freqs]
+DATA_FILENAME = 'macmorpho-train.txt'
+BATCH_SIZE = 128
+EPOCHS = 201
+LEARNING_RATE = 1.
+MIN_COUNT = 5
+WINDOW_SIZE = 5
+NUM_SAMPLED = 15
+EMBEDDING_SIZE = 50
+SAMPLING_FACTOR = 1e-5
+SMOOTH_FACTOR = .75
 
 
 def skipgrams(sequence,
@@ -56,15 +53,15 @@ def skipgrams(sequence,
     return words, contexts
 
 
-def tokenizer(filename):
+def prepare_data(filename):
     with open(filename, encoding='utf-8') as texts:
         num = re.compile(r'_.+')
         sentences = [[re.sub(num, '', token).lower() for token in line.split()]
                      for line in texts]
 
     words_freqs = Counter(chain.from_iterable(sentences)).most_common()
-    words_freqs.append(('unk', min_count + 1))
-    words, frequencies = zip(*[x for x in words_freqs if x[1] > min_count])
+    words_freqs.append(('unk', MIN_COUNT + 1))
+    words, frequencies = zip(*[x for x in words_freqs if x[1] > MIN_COUNT])
     word2id = {w: i for i, w in enumerate(words)}
     id2word = [key for key, val in word2id.items()]
 
@@ -76,95 +73,92 @@ def texts_to_sequences(texts, word2id):
              for token in line] for line in texts]
 
 
-sents, freqs, w2id, id2w = tokenizer(data_filename)
+def make_sampling_table(word_freqs, sampling_factor=1e-5):
+    return [1 - math.sqrt(sampling_factor / freq_i) for freq_i in word_freqs]
+
+
+sents, freqs, w2id, id2w = prepare_data(DATA_FILENAME)
 sequences = texts_to_sequences(sents, w2id)
-sampling_tbl = make_sampling_table(freqs, sampling_factor=sampling_fac)
-wrds = []
-ctxts = []
+sampling_table = make_sampling_table(freqs, sampling_factor=SAMPLING_FACTOR)
+
+words = []
+contexts = []
 for seq in sequences:
-    w_, c_ = skipgrams(seq, window_size=win_sz, sampling_table=sampling_tbl)
-    wrds += w_
-    ctxts += c_
+    w, c = skipgrams(
+        seq,
+        window_size=WINDOW_SIZE,
+        sampling_table=sampling_table)
+    words += w
+    contexts += c
 
 with tf.Graph().as_default() as graph:
-    with tf.name_scope('inputs'):
-        inputs = tf.placeholder(tf.int64, [batch_sz], name='inputs')
-        labels = tf.placeholder(tf.int64, [batch_sz, 1], name='labels')
-        sampled_ids = tf.placeholder(tf.int64, [neg_samples], name='samp_ids')
-        true_count = tf.placeholder(tf.float64, [batch_sz, 1], name='true_cnt')
-        sampled_count = tf.placeholder(tf.float64, [neg_samples], name='samp_cnt')
+    with tf.name_scope('data'):
+        dataset = tf.data.Dataset.from_tensor_slices(
+            (np.asarray(words, np.int64),
+             np.asarray(contexts, np.int64))).repeat().batch(BATCH_SIZE)
+        iterator = dataset.make_initializable_iterator()
+        inputs, labels = iterator.get_next()
+        labels_matrix = tf.reshape(labels, [BATCH_SIZE, 1])
 
     with tf.name_scope('embeddings'):
         embeddings = tf.get_variable(
             'embeddings',
-            shape=[len(w2id), emb_dim],
-            dtype=tf.float64,
+            shape=[len(w2id), EMBEDDING_SIZE],
+            dtype=tf.float32,
             initializer=tf.glorot_uniform_initializer())
         embs = tf.nn.embedding_lookup(embeddings, inputs)
 
     with tf.name_scope('weights'):
-        loss_w = tf.get_variable(
-            'loss_weights',
-            shape=[len(w2id), emb_dim],
-            dtype=tf.float64,
+        sm_w = tf.get_variable(
+            'sm_weights',
+            shape=[len(w2id), EMBEDDING_SIZE],
+            dtype=tf.float32,
             initializer=tf.glorot_uniform_initializer())
 
     with tf.name_scope('biases'):
-        loss_b = tf.get_variable(
-            'loss_biases',
+        sm_b = tf.get_variable(
+            'sm_biases',
             shape=[len(w2id)],
-            dtype=tf.float64,
-            initializer=tf.ones_initializer)
+            dtype=tf.float32,
+            initializer=tf.zeros_initializer())
 
     with tf.name_scope('loss'):
-        loss = tf.nn.sampled_softmax_loss(
-            weights=loss_w,
-            biases=loss_b,
-            labels=labels,
+        loss = tf.reduce_mean(tf.nn.sampled_softmax_loss(
+            weights=sm_w,
+            biases=sm_b,
+            labels=labels_matrix,
             inputs=embs,
-            num_sampled=neg_samples,
+            num_sampled=NUM_SAMPLED,
             num_classes=len(w2id),
-            sampled_values=(sampled_ids, true_count, sampled_count))
+            sampled_values=tf.nn.fixed_unigram_candidate_sampler(
+                true_classes=labels_matrix,
+                num_true=1,
+                num_sampled=NUM_SAMPLED,
+                unique=True,
+                range_max=len(w2id),
+                distortion=SMOOTH_FACTOR,
+                unigrams=freqs)))
 
     with tf.name_scope('optimizer'):
         optimizer = tf.train.GradientDescentOptimizer(1).minimize(loss)
 
     with tf.Session(graph=graph) as sess:
-        writer = tf.summary.FileWriter('./graphs', session=sess)
+        sess.run(iterator.initializer)
         sess.run(tf.global_variables_initializer())
 
-        average_loss = 0
-        for ep in range(eps):
-            for step in range(len(w2id) // batch_sz):
-                inputs = wrds[batch_sz * step:batch_sz * (step + 1)]
-                inputs = tf.convert_to_tensor(inputs, tf.int64)
-                labels = ctxts[batch_sz * step:batch_sz * (step + 1)]
-                labels_matrix = tf.reshape(tf.cast(labels, tf.int64),
-                                           [batch_sz, 1])
-                print('teste')
-                sampled_ids, true_count, sampled_count = \
-                    tf.nn.fixed_unigram_candidate_sampler(
-                        true_classes=labels_matrix,
-                        num_true=1,
-                        num_sampled=neg_samples,
-                        unique=True,
-                        range_max=len(w2id),
-                        distortion=distortion_fac,
-                        unigrams=freqs)
+        total_loss = 0.
+        writer = tf.summary.FileWriter('./graphs', tf.get_default_graph())
 
-                feed_dict = {inputs: inputs,
-                             labels: labels_matrix,
-                             sampled_ids: sampled_ids,
-                             true_count: true_count,
-                             sampled_count: sampled_count}
+        for index in range(EPOCHS):
+            try:
+                loss_batch, _ = sess.run([loss, optimizer])
+                total_loss += loss_batch
+                if index % 20 == 0:
+                    if index > 0:
+                        print('Average loss at step {}: {:5.1f}'.format(
+                            index, total_loss / 20))
+                    total_loss = 0.0
+            except tf.errors.OutOfRangeError:
+                sess.run(iterator.initializer)
 
-                _, loss_val = sess.run([optimizer, loss], feed_dict=feed_dict)
-                average_loss += loss_val
-
-                if step % 100 == 0:
-                    if step > 0:
-                        average_loss /= 2000
-                        print(step, ': ', average_loss)
-                average_loss = 0
-
-    writer.close()
+        writer.close()
