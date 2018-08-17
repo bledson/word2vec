@@ -8,7 +8,8 @@ from itertools import chain
 
 DATA_FILENAME = 'macmorpho-train.txt'
 BATCH_SIZE = 128
-EPOCHS = 201
+EPOCHS = 10
+STEP = 2000
 LEARNING_RATE = 1.
 MIN_COUNT = 5
 WINDOW_SIZE = 5
@@ -95,7 +96,9 @@ with tf.Graph().as_default() as graph:
     with tf.name_scope('data'):
         dataset = tf.data.Dataset.from_tensor_slices(
             (np.asarray(words, np.int64),
-             np.asarray(contexts, np.int64))).repeat().batch(BATCH_SIZE)
+             np.asarray(contexts, np.int64))).repeat(EPOCHS)
+        dataset = dataset.apply(tf.contrib.data.batch_and_drop_remainder(
+            BATCH_SIZE))
         iterator = dataset.make_initializable_iterator()
         inputs, labels = iterator.get_next()
         labels_matrix = tf.reshape(labels, [BATCH_SIZE, 1])
@@ -146,19 +149,20 @@ with tf.Graph().as_default() as graph:
         sess.run(iterator.initializer)
         sess.run(tf.global_variables_initializer())
 
-        total_loss = 0.
+        average_loss = 0.
         writer = tf.summary.FileWriter('./graphs', tf.get_default_graph())
 
-        for index in range(EPOCHS):
+        step = 0
+        while True:
+            step += 1
             try:
                 loss_batch, _ = sess.run([loss, optimizer])
-                total_loss += loss_batch
-                if index % 20 == 0:
-                    if index > 0:
-                        print('Average loss at step {}: {:5.1f}'.format(
-                            index, total_loss / 20))
-                    total_loss = 0.0
+                average_loss += loss_batch
+                if step % STEP == 0:
+                    print('Average loss at step {}: {:5.4f}'.format(
+                        step, average_loss / STEP))
+                    average_loss = 0.0
             except tf.errors.OutOfRangeError:
-                sess.run(iterator.initializer)
+                break
 
         writer.close()
