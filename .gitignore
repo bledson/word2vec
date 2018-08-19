@@ -1,4 +1,4 @@
-.graphs/
+graphs/
 .idea/
 .ipynb_checkpoints/
 *.iml
