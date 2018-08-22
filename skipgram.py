@@ -8,13 +8,13 @@ from itertools import chain
 
 DATA_FILENAME = 'macmorpho-train.txt'
 BATCH_SIZE = 128
-EPOCHS = 10
-STEP = 2000
+EPOCHS = 40
+STEP = 40000
 LEARNING_RATE = 1.
 MIN_COUNT = 5
-WINDOW_SIZE = 5
-NUM_SAMPLED = 15
-EMBEDDING_SIZE = 50
+WINDOW_SIZE = 2
+NUM_SAMPLED = 64
+EMBEDDING_SIZE = 100
 SAMPLING_FACTOR = 1e-5
 SMOOTH_FACTOR = .75
 
@@ -78,7 +78,14 @@ def make_sampling_table(word_freqs, sampling_factor=1e-5):
     return [1 - math.sqrt(sampling_factor / freq_i) for freq_i in word_freqs]
 
 
+def save_to_tsv(words):
+    with open('labels.tsv', 'w+', encoding='utf-8') as labels_file:
+        for word in words.keys():
+            labels_file.write('{}\n'.format(word))
+
+
 sents, freqs, w2id, id2w = prepare_data(DATA_FILENAME)
+save_to_tsv(w2id)
 sequences = texts_to_sequences(sents, w2id)
 sampling_table = make_sampling_table(freqs, sampling_factor=SAMPLING_FACTOR)
 
@@ -143,8 +150,16 @@ with tf.Graph().as_default() as graph:
                 unigrams=freqs)))
 
     with tf.name_scope('optimizer'):
-        optimizer = tf.train.GradientDescentOptimizer(1).minimize(loss)
+        global_step = tf.Variable(
+            0,
+            dtype=tf.int32,
+            name='global_step',
+            trainable=False)
+        optimizer = tf.train.MomentumOptimizer(.5, .9).minimize(
+            loss,
+            global_step=global_step)
 
+    saver = tf.train.Saver(max_to_keep=1, name='saver')
     with tf.Session(graph=graph) as sess:
         sess.run(iterator.initializer)
         sess.run(tf.global_variables_initializer())
@@ -159,10 +174,12 @@ with tf.Graph().as_default() as graph:
                 loss_batch, _ = sess.run([loss, optimizer])
                 average_loss += loss_batch
                 if step % STEP == 0:
+                    saver.save(sess, './model', global_step)
                     print('Average loss at step {}: {:5.4f}'.format(
                         step, average_loss / STEP))
-                    average_loss = 0.0
+                    average_loss = 0.
             except tf.errors.OutOfRangeError:
+                saver.save(sess, './model', global_step)
                 break
 
         writer.close()
