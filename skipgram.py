@@ -59,7 +59,8 @@ def prepare_data(filename):
         num = re.compile(r'_.+')
         sentences = [[re.sub(num, '', token).lower() for token in line.split()]
                      for line in texts]
-
+        senteces = filter( lambda sent: len(sent) >= MIN_LENGTH , sentences)   
+        
     words_freqs = Counter(chain.from_iterable(sentences)).most_common()
     words_freqs.append(('unk', MIN_COUNT + 1))
     words, frequencies = zip(*[x for x in words_freqs if x[1] > MIN_COUNT])
