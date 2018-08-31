@@ -9,11 +9,11 @@ import tensorflow as tf
 
 DATA_FILENAME = 'macmorpho-train.txt'
 BATCH_SIZE = 128
-EPOCHS = 100
+EPOCHS = 10
 STEP = 40000
 LEARNING_RATE = .25
-MIN_COUNT = 5
-MIN_LENGTH = 5
+MIN_COUNT = 6
+MIN_LENGTH = 6
 WINDOW_SIZE = 2
 NUM_SAMPLED = 128
 EMBEDDING_SIZE = 300
@@ -27,7 +27,42 @@ def cbows(
         shuffle=True,
         sampling_table=None,
         seed=None):
-    pass
+    contexts = []
+    words = []
+    for i, wi in enumerate(sequence):
+        if not wi:
+            continue
+        if sampling_table is not None:
+            if sampling_table[wi] < random.random():
+                continue
+
+        window_start = max(0, i - window_size)
+        window_end = min(len(sequence), i + window_size + 1)
+        contexts_wi = []
+        for j in range(window_start, window_end):
+            if j != i:
+                wj = sequence[j]
+                if not wj:
+                    continue
+                contexts_wi.append(wj)
+        contexts.append(contexts_wi)
+        words.append(wi)
+
+    if shuffle:
+        if seed is None:
+            seed = random.randint(0, 10e6)
+        random.seed(seed)
+        random.shuffle(words)
+        random.seed(seed)
+        random.shuffle(contexts)
+
+    return contexts, words
+
+
+def pad_sequences(sequences, max_len, padding_value=0):
+    for i, seq in enumerate(sequences):
+        sequences[i] += [padding_value] * (max_len - len(seq))
+    return sequences
 
 
 def prepare_data(filename):
@@ -35,11 +70,12 @@ def prepare_data(filename):
         num = re.compile(r'_.+')
         sentences = [[re.sub(num, '', token).lower() for token in line.split()]
                      for line in texts]
-        sentences = [sent for sent in sentences if len(sent) > MIN_LENGTH]
+        sentences = [sent for sent in sentences if len(sent) >= MIN_LENGTH]
 
     words_freqs = Counter(chain.from_iterable(sentences)).most_common()
-    words_freqs.append(('unk', MIN_COUNT + 1))
-    words, frequencies = zip(*[x for x in words_freqs if x[1] > MIN_COUNT])
+    words_freqs.append(('<unk>', MIN_COUNT))
+    words_freqs.append(('<pad>', MIN_COUNT))
+    words, frequencies = zip(*[x for x in words_freqs if x[1] >= MIN_COUNT])
     word2id = {w: i for i, w in enumerate(words)}
     id2word = [key for key, val in word2id.items()]
 
@@ -47,7 +83,7 @@ def prepare_data(filename):
 
 
 def texts_to_sequences(texts, word2id):
-    return [[word2id[token] if token in word2id else word2id['unk']
+    return [[word2id[token] if token in word2id else word2id['<unk>']
              for token in line] for line in texts]
 
 
@@ -61,11 +97,34 @@ def save_to_tsv(words):
             labels_file.write('{}\n'.format(word))
 
 
+def some(vec):
+    mask = tf.not_equal(vec, 0)
+    valid_ids = tf.boolean_mask(vec, mask)
+    embs = tf.nn.embedding_lookup(embeddings, valid_ids)
+    return tf.reduce_mean(embs, axis=0)
+
+
+sents, freqs, w2id, id2w = prepare_data(DATA_FILENAME)
+save_to_tsv(w2id)
+sequences = texts_to_sequences(sents, w2id)
+sampling_table = make_sampling_table(freqs, sampling_factor=SAMPLING_FACTOR)
+
+contexts = []
+words = []
+for seq in sequences:
+    c, w = cbows(
+        seq,
+        window_size=WINDOW_SIZE,
+        sampling_table=sampling_table)
+    contexts += c
+    words += w
+contexts = pad_sequences(contexts, 2 * WINDOW_SIZE)
+
 with tf.Graph().as_default() as graph:
     with tf.name_scope('data'):
         dataset = tf.data.Dataset.from_tensor_slices(
-            (np.asarray(words, np.int64),
-             np.asarray(contexts, np.int64)))
+            (tf.convert_to_tensor(contexts, np.int64),
+             tf.convert_to_tensor(words, np.int64)))
         dataset = dataset.batch(BATCH_SIZE, drop_remainder=True).repeat(EPOCHS)
         iterator = dataset.make_initializable_iterator()
         inputs, labels = iterator.get_next()
@@ -77,7 +136,7 @@ with tf.Graph().as_default() as graph:
             shape=[len(w2id), EMBEDDING_SIZE],
             dtype=tf.float32,
             initializer=tf.glorot_uniform_initializer())
-        embs = tf.nn.embedding_lookup(embeddings, inputs)
+        embs = tf.map_fn(some, inputs, dtype=tf.float32)
 
     with tf.name_scope('weights'):
         sm_w = tf.get_variable(
@@ -91,24 +150,26 @@ with tf.Graph().as_default() as graph:
             'sm_biases',
             shape=[len(w2id)],
             dtype=tf.float32,
-            initializer=tf.zeros_initializer())
+            initializer=tf.zeros_initializer(),
+            trainable=False)
 
     with tf.name_scope('loss'):
-        loss = tf.reduce_mean(tf.nn.sampled_softmax_loss(
-            weights=sm_w,
-            biases=sm_b,
-            labels=labels_matrix,
-            inputs=embs,
-            num_sampled=NUM_SAMPLED,
-            num_classes=len(w2id),
-            sampled_values=tf.nn.fixed_unigram_candidate_sampler(
-                true_classes=labels_matrix,
-                num_true=1,
+        loss = tf.reduce_mean(
+            tf.nn.sampled_softmax_loss(
+                weights=sm_w,
+                biases=sm_b,
+                labels=labels_matrix,
+                inputs=embs,
                 num_sampled=NUM_SAMPLED,
-                unique=True,
-                range_max=len(w2id),
-                distortion=SMOOTH_FACTOR,
-                unigrams=freqs)))
+                num_classes=len(w2id),
+                sampled_values=tf.nn.fixed_unigram_candidate_sampler(
+                    true_classes=labels_matrix,
+                    num_true=1,
+                    num_sampled=NUM_SAMPLED,
+                    unique=True,
+                    range_max=len(w2id),
+                    distortion=SMOOTH_FACTOR,
+                    unigrams=freqs)))
 
     with tf.name_scope('optimizer'):
         global_step = tf.Variable(
@@ -127,7 +188,14 @@ with tf.Graph().as_default() as graph:
 
         average_loss = 0.
         writer = tf.summary.FileWriter('./graphs', tf.get_default_graph())
-        saver.save(sess, './model', global_step)
+        saver.save(
+            sess,
+            './models/skip-gram_{}d_{}n_{}w_{}c'.format(
+                EMBEDDING_SIZE,
+                NUM_SAMPLED,
+                WINDOW_SIZE,
+                MIN_COUNT),
+            global_step)
 
         step = 0
         while True:
@@ -136,12 +204,26 @@ with tf.Graph().as_default() as graph:
                 loss_batch, _ = sess.run([loss, optimizer])
                 average_loss += loss_batch
                 if step % STEP == 0:
-                    saver.save(sess, './model', global_step)
+                    saver.save(
+                        sess,
+                        './models/cbow_{}d_{}n_{}w_{}c'.format(
+                            EMBEDDING_SIZE,
+                            NUM_SAMPLED,
+                            WINDOW_SIZE,
+                            MIN_COUNT),
+                        global_step)
                     print('Average loss at step {}: {:5.4f}'.format(
                         step, average_loss / STEP))
                     average_loss = 0.
             except tf.errors.OutOfRangeError:
-                saver.save(sess, './model', global_step)
+                saver.save(
+                    sess,
+                    './models/cbow_{}d_{}n_{}w_{}c'.format(
+                        EMBEDDING_SIZE,
+                        NUM_SAMPLED,
+                        WINDOW_SIZE,
+                        MIN_COUNT),
+                    global_step)
                 break
 
         writer.close()
