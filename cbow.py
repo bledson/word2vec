@@ -1,11 +1,9 @@
-import math
 import random
-import re
-from collections import Counter
-from itertools import chain
 
 import numpy as np
 import tensorflow as tf
+
+from utils import *
 
 DATA_FILENAME = 'macmorpho-train.txt'
 BATCH_SIZE = 128
@@ -59,53 +57,18 @@ def cbows(
     return contexts, words
 
 
-def pad_sequences(sequences, max_len, padding_value=0):
-    for i, seq in enumerate(sequences):
-        sequences[i] += [padding_value] * (max_len - len(seq))
-    return sequences
-
-
-def prepare_data(filename):
-    with open(filename, encoding='utf-8') as texts:
-        num = re.compile(r'_.+')
-        sentences = [[re.sub(num, '', token).lower() for token in line.split()]
-                     for line in texts]
-        sentences = [sent for sent in sentences if len(sent) >= MIN_LENGTH]
-
-    words_freqs = Counter(chain.from_iterable(sentences)).most_common()
-    words_freqs.append(('<unk>', MIN_COUNT))
-    words_freqs.append(('<pad>', MIN_COUNT))
-    words, frequencies = zip(*[x for x in words_freqs if x[1] >= MIN_COUNT])
-    word2id = {w: i for i, w in enumerate(words)}
-    id2word = [key for key, val in word2id.items()]
-
-    return sentences, frequencies, word2id, id2word
-
-
-def texts_to_sequences(texts, word2id):
-    return [[word2id[token] if token in word2id else word2id['<unk>']
-             for token in line] for line in texts]
-
-
-def make_sampling_table(word_freqs, sampling_factor=1e-5):
-    return [1 - math.sqrt(sampling_factor / freq_i) for freq_i in word_freqs]
-
-
-def save_to_tsv(words):
-    with open('labels.tsv', 'w+', encoding='utf-8') as labels_file:
-        for word in words.keys():
-            labels_file.write('{}\n'.format(word))
-
-
-def some(vec):
-    mask = tf.not_equal(vec, 0)
-    valid_ids = tf.boolean_mask(vec, mask)
+def context_reduce_mean(contexts):
+    mask = tf.not_equal(contexts, 0)
+    valid_ids = tf.boolean_mask(contexts, mask)
     embs = tf.nn.embedding_lookup(embeddings, valid_ids)
     return tf.reduce_mean(embs, axis=0)
 
 
-sents, freqs, w2id, id2w = prepare_data(DATA_FILENAME)
-save_to_tsv(w2id)
+sents, freqs, w2id, id2w = prepare_data(
+    DATA_FILENAME,
+    min_count=MIN_COUNT,
+    minlen=MIN_LENGTH)
+labels_to_tsv(w2id)
 sequences = texts_to_sequences(sents, w2id)
 sampling_table = make_sampling_table(freqs, sampling_factor=SAMPLING_FACTOR)
 
@@ -136,7 +99,7 @@ with tf.Graph().as_default() as graph:
             shape=[len(w2id), EMBEDDING_SIZE],
             dtype=tf.float32,
             initializer=tf.glorot_uniform_initializer())
-        embs = tf.map_fn(some, inputs, dtype=tf.float32)
+        embs = tf.map_fn(context_reduce_mean, inputs, dtype=tf.float32)
 
     with tf.name_scope('weights'):
         sm_w = tf.get_variable(
@@ -169,7 +132,8 @@ with tf.Graph().as_default() as graph:
                     unique=True,
                     range_max=len(w2id),
                     distortion=SMOOTH_FACTOR,
-                    unigrams=freqs)))
+                    num_reserved_ids=1,
+                    unigrams=freqs[1:])))
 
     with tf.name_scope('optimizer'):
         global_step = tf.Variable(
@@ -181,7 +145,7 @@ with tf.Graph().as_default() as graph:
             loss,
             global_step=global_step)
 
-    saver = tf.train.Saver(name='saver')
+    saver = tf.train.Saver(name='saver', max_to_keep=1)
     with tf.Session(graph=graph) as sess:
         sess.run(iterator.initializer)
         sess.run(tf.global_variables_initializer())

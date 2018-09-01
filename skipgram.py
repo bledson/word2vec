@@ -1,19 +1,17 @@
-import math
 import random
-import re
-from collections import Counter
-from itertools import chain
 
 import numpy as np
 import tensorflow as tf
+
+from utils import *
 
 DATA_FILENAME = 'macmorpho-train.txt'
 BATCH_SIZE = 128
 EPOCHS = 100
 STEP = 40000
 LEARNING_RATE = .25
-MIN_COUNT = 5
-MIN_LENGTH = 5
+MIN_COUNT = 6
+MIN_LENGTH = 6
 WINDOW_SIZE = 2
 NUM_SAMPLED = 128
 EMBEDDING_SIZE = 300
@@ -57,39 +55,11 @@ def skipgrams(
     return words, contexts
 
 
-def prepare_data(filename):
-    with open(filename, encoding='utf-8') as texts:
-        num = re.compile(r'_.+')
-        sentences = [[re.sub(num, '', token).lower() for token in line.split()]
-                     for line in texts]
-        sentences = [sent for sent in sentences if len(sent) > MIN_LENGTH]
-
-    words_freqs = Counter(chain.from_iterable(sentences)).most_common()
-    words_freqs.append(('<unk>', MIN_COUNT + 1))
-    words, frequencies = zip(*[x for x in words_freqs if x[1] > MIN_COUNT])
-    word2id = {w: i for i, w in enumerate(words)}
-    id2word = [key for key, val in word2id.items()]
-
-    return sentences, frequencies, word2id, id2word
-
-
-def texts_to_sequences(texts, word2id):
-    return [[word2id[token] if token in word2id else word2id['<unk>']
-             for token in line] for line in texts]
-
-
-def make_sampling_table(word_freqs, sampling_factor=1e-5):
-    return [1 - math.sqrt(sampling_factor / freq_i) for freq_i in word_freqs]
-
-
-def save_to_tsv(words):
-    with open('labels.tsv', 'w+', encoding='utf-8') as labels_file:
-        for word in words.keys():
-            labels_file.write('{}\n'.format(word))
-
-
-sents, freqs, w2id, id2w = prepare_data(DATA_FILENAME)
-save_to_tsv(w2id)
+sents, freqs, w2id, id2w = prepare_data(
+    DATA_FILENAME,
+    min_count=MIN_COUNT,
+    minlen=MIN_LENGTH)
+labels_to_tsv(w2id)
 sequences = texts_to_sequences(sents, w2id)
 sampling_table = make_sampling_table(freqs, sampling_factor=SAMPLING_FACTOR)
 
@@ -106,8 +76,8 @@ for seq in sequences:
 with tf.Graph().as_default() as graph:
     with tf.name_scope('data'):
         dataset = tf.data.Dataset.from_tensor_slices(
-            (np.asarray(words, np.int64),
-             np.asarray(contexts, np.int64)))
+            (tf.convert_to_tensor(words, np.int64),
+             tf.convert_to_tensor(contexts, np.int64)))
         dataset = dataset.batch(BATCH_SIZE, drop_remainder=True).repeat(EPOCHS)
         iterator = dataset.make_initializable_iterator()
         inputs, labels = iterator.get_next()
@@ -134,24 +104,27 @@ with tf.Graph().as_default() as graph:
             'sm_biases',
             shape=[len(w2id)],
             dtype=tf.float32,
-            initializer=tf.zeros_initializer())
+            initializer=tf.zeros_initializer(),
+            trainable=False)
 
     with tf.name_scope('loss'):
-        loss = tf.reduce_mean(tf.nn.sampled_softmax_loss(
-            weights=sm_w,
-            biases=sm_b,
-            labels=labels_matrix,
-            inputs=embs,
-            num_sampled=NUM_SAMPLED,
-            num_classes=len(w2id),
-            sampled_values=tf.nn.fixed_unigram_candidate_sampler(
-                true_classes=labels_matrix,
-                num_true=1,
+        loss = tf.reduce_mean(
+            tf.nn.sampled_softmax_loss(
+                weights=sm_w,
+                biases=sm_b,
+                labels=labels_matrix,
+                inputs=embs,
                 num_sampled=NUM_SAMPLED,
-                unique=True,
-                range_max=len(w2id),
-                distortion=SMOOTH_FACTOR,
-                unigrams=freqs)))
+                num_classes=len(w2id),
+                sampled_values=tf.nn.fixed_unigram_candidate_sampler(
+                    true_classes=labels_matrix,
+                    num_true=1,
+                    num_sampled=NUM_SAMPLED,
+                    unique=True,
+                    range_max=len(w2id),
+                    distortion=SMOOTH_FACTOR,
+                    num_reserved_ids=1,
+                    unigrams=freqs[1:])))
 
     with tf.name_scope('optimizer'):
         global_step = tf.Variable(
@@ -180,8 +153,11 @@ with tf.Graph().as_default() as graph:
                 if step % STEP == 0:
                     saver.save(
                         sess,
-                        './models/skip-gram_{}d_{}n'.format(EMBEDDING_SIZE,
-                                                            NUM_SAMPLED),
+                        './models/skip-gram_{}d_{}n_{}w_{}c'.format(
+                            EMBEDDING_SIZE,
+                            NUM_SAMPLED,
+                            WINDOW_SIZE,
+                            MIN_COUNT),
                         global_step)
                     print('Average loss at step {}: {:5.4f}'.format(
                         step, average_loss / STEP))
@@ -189,8 +165,11 @@ with tf.Graph().as_default() as graph:
             except tf.errors.OutOfRangeError:
                 saver.save(
                     sess,
-                    './models/skip-gram_{}d_{}n'.format(EMBEDDING_SIZE,
-                                                        NUM_SAMPLED),
+                    './models/skip-gram_{}d_{}n_{}w_{}c'.format(
+                        EMBEDDING_SIZE,
+                        NUM_SAMPLED,
+                        WINDOW_SIZE,
+                        MIN_COUNT),
                     global_step)
                 break
 
