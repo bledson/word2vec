@@ -7,7 +7,7 @@ from utils import *
 
 DATA_FILENAME = 'macmorpho-train.txt'
 BATCH_SIZE = 128
-EPOCHS = 10
+EPOCHS = 5
 STEP = 40000
 LEARNING_RATE = .25
 MIN_COUNT = 6
@@ -57,11 +57,10 @@ def cbows(
     return contexts, words
 
 
-def context_reduce_mean(contexts):
-    mask = tf.not_equal(contexts, 0)
-    valid_ids = tf.boolean_mask(contexts, mask)
-    embs = tf.nn.embedding_lookup(embeddings, valid_ids)
-    return tf.reduce_mean(embs, axis=0)
+def context_reduce_mean(embs_mask):
+    embs, mask = embs_mask
+    valid_ids = tf.boolean_mask(embs, mask)
+    return tf.reduce_mean(valid_ids, axis=0)
 
 
 sents, freqs, w2id, id2w = prepare_data(
@@ -99,7 +98,12 @@ with tf.Graph().as_default() as graph:
             shape=[len(w2id), EMBEDDING_SIZE],
             dtype=tf.float32,
             initializer=tf.glorot_uniform_initializer())
-        embs = tf.map_fn(context_reduce_mean, inputs, dtype=tf.float32)
+        mask = tf.not_equal(inputs, 0)
+        batch_embs = tf.nn.embedding_lookup(embeddings, inputs)
+        embs = tf.map_fn(
+            fn=context_reduce_mean,
+            elems=(batch_embs, mask),
+            dtype=tf.float32)
 
     with tf.name_scope('weights'):
         sm_w = tf.get_variable(
@@ -145,7 +149,7 @@ with tf.Graph().as_default() as graph:
             loss,
             global_step=global_step)
 
-    saver = tf.train.Saver(name='saver', max_to_keep=1)
+    saver = tf.train.Saver(name='saver')
     with tf.Session(graph=graph) as sess:
         sess.run(iterator.initializer)
         sess.run(tf.global_variables_initializer())
@@ -154,7 +158,7 @@ with tf.Graph().as_default() as graph:
         writer = tf.summary.FileWriter('./graphs', tf.get_default_graph())
         saver.save(
             sess,
-            './models/skip-gram_{}d_{}n_{}w_{}c'.format(
+            './models/cbow_{}d_{}n_{}w_{}c'.format(
                 EMBEDDING_SIZE,
                 NUM_SAMPLED,
                 WINDOW_SIZE,

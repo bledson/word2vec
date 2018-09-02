@@ -7,7 +7,7 @@ from utils import *
 
 DATA_FILENAME = 'macmorpho-train.txt'
 BATCH_SIZE = 128
-EPOCHS = 100
+EPOCHS = 5
 STEP = 40000
 LEARNING_RATE = .25
 MIN_COUNT = 6
@@ -136,7 +136,7 @@ with tf.Graph().as_default() as graph:
             loss,
             global_step=global_step)
 
-    saver = tf.train.Saver(name='saver', max_to_keep=1)
+    saver = tf.train.Saver(name='saver')
     with tf.Session(graph=graph) as sess:
         sess.run(iterator.initializer)
         sess.run(tf.global_variables_initializer())
